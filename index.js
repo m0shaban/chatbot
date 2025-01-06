@@ -1,6 +1,7 @@
 /************************************************************
  * index.js
  * شات بوت فيسبوك ماسنجر مدمج مع Dialogflow ES باستخدام Node.js
+ * مع إضافة قسم تجريبي لاستدعاء Gemini (Generative Language API).
  ************************************************************/
 
 require('dotenv').config(); // لتحميل متغيرات البيئة من .env
@@ -9,20 +10,23 @@ const bodyParser = require('body-parser');
 const axios = require('axios');
 const dialogflow = require('@google-cloud/dialogflow');
 
-// 1. قراءتها من ملف .env
+// ========== المتغيرات من .env ==========
 const PORT = process.env.PORT || 3000;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const DIALOGFLOW_PROJECT_ID = process.env.DIALOGFLOW_PROJECT_ID;
 
-// 2. إنشاء عميل Dialogflow
+// إن كنت ستستخدم Gemini مستقبلاً:
+// const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ''; // مثال
+
+// إنشاء عميل Dialogflow
 const sessionClient = new dialogflow.SessionsClient();
 
 const app = express();
 app.use(bodyParser.json());
 
 // ----------------------------------------------------
-// التحقق من Webhook - فيسبوك يستدعي هذا العنوان (GET /webhook)
+// Webhook Verification (GET /webhook)
 // ----------------------------------------------------
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -38,29 +42,28 @@ app.get('/webhook', (req, res) => {
 });
 
 // ----------------------------------------------------
-// استقبال رسائل الماسنجر - (POST /webhook)
+// Messenger Events (POST /webhook)
 // ----------------------------------------------------
 app.post('/webhook', (req, res) => {
   const body = req.body;
 
-  // تأكد أن الحدث من صفحة فيسبوك
+  // تأكد أن الحدث من نوع صفحة فيسبوك
   if (body.object === 'page') {
     body.entry.forEach(entry => {
-      // قد يحتوي entry على عدة أحداث، نأخذ الأول لغرض التبسيط
+      // قد يحتوي entry على عدة أحداث، هنا نأخذ الأول تبسيطًا
       const webhookEvent = entry.messaging[0];
       console.log('Incoming event:', webhookEvent);
 
-      // معرف الشخص المرسل (Page Scoped ID)
-      const senderPsid = webhookEvent.sender.id;
-
-      // تحقق ما إذا كانت رسالة نصية أو Postback
+      const senderPsid = webhookEvent.sender.id; // المرسل (العميل)
+      
+      // هل هو Message أم Postback؟
       if (webhookEvent.message) {
         handleMessage(senderPsid, webhookEvent.message);
       } else if (webhookEvent.postback) {
         // handlePostback(senderPsid, webhookEvent.postback);
       }
     });
-    // الرد بـ 200 OK لفيسبوك
+    // رد 200 لفيسبوك
     return res.status(200).send('EVENT_RECEIVED');
   } else {
     // إذا لم يكن من نوع page
@@ -69,27 +72,37 @@ app.post('/webhook', (req, res) => {
 });
 
 // ----------------------------------------------------
-// handleMessage: إرسال النص إلى Dialogflow واستقبال الرد
+// handleMessage: استقبال النص من المستخدم
 // ----------------------------------------------------
 async function handleMessage(senderPsid, receivedMessage) {
   if (!receivedMessage.text) {
-    // إذا الرسالة ليست نص (مثلاً صورة/ملف)، نتعامل برد بسيط
+    // إذا الرسالة ليست نصًا (صورة/ملف مثلًا)، نرد برد بسيط
     await sendMessage(senderPsid, { text: 'I can only handle text messages for now.' });
     return;
   }
 
   const userText = receivedMessage.text;
+  console.log(`User said: ${userText}`);
 
-  // نرسل النص إلى Dialogflow
-  const dialogflowResponse = await sendToDialogflow(userText, senderPsid);
+  // ===== اختيار: هل تريد استدعاء Gemini أم Dialogflow أم كلاهما؟ =====
+  // مثال بسيط:
+  // إذا كتب المستخدم عبارة فيها كلمة "gemini" نرسلها لـ Gemini بدلًا من Dialogflow
+  if (userText.toLowerCase().includes('gemini')) {
+    // استدعاء Gemini
+    const geminiReply = await callGeminiAPI(userText);
+    await sendMessage(senderPsid, { text: geminiReply });
+  } else {
+    // نرسل النص إلى Dialogflow
+    const dialogflowResponse = await sendToDialogflow(userText, senderPsid);
 
-  // Dialogflow يعيد fulfillmentText عند تطابق Intent
-  const responseText = dialogflowResponse.fulfillmentText || "I'm not sure I understand.";
-  await sendMessage(senderPsid, { text: responseText });
+    // قراءة fulfillmentText
+    const responseText = dialogflowResponse.fulfillmentText || "I'm not sure I understand.";
+    await sendMessage(senderPsid, { text: responseText });
+  }
 }
 
 // ----------------------------------------------------
-// sendToDialogflow: دالة تستدعي detectIntent
+// sendToDialogflow: استدعاء detectIntent
 // ----------------------------------------------------
 async function sendToDialogflow(text, sessionId) {
   const sessionPath = sessionClient.projectAgentSessionPath(DIALOGFLOW_PROJECT_ID, sessionId);
@@ -99,7 +112,7 @@ async function sendToDialogflow(text, sessionId) {
     queryInput: {
       text: {
         text: text,
-        languageCode: 'en' // أو "ar" إذا تستخدم العربية
+        languageCode: 'en' // أو ar إذا تريد العربية
       },
     },
   };
@@ -115,7 +128,34 @@ async function sendToDialogflow(text, sessionId) {
 }
 
 // ----------------------------------------------------
-// sendMessage: يرسل رسالة إلى مستخدم الماسنجر عبر فيسبوك Graph API
+// callGeminiAPI: دالة تجريبية لاستدعاء Gemini
+// ----------------------------------------------------
+async function callGeminiAPI(prompt) {
+  try {
+    // مثال وهمي باستخدام axios:
+    // const apiUrl = 'https://generativelanguage.googleapis.com/v1beta1/gemini:generateText';
+    // const response = await axios.post(
+    //   apiUrl,
+    //   { prompt }, 
+    //   {
+    //     headers: {
+    //       Authorization: `Bearer ${GEMINI_API_KEY}`,
+    //       'Content-Type': 'application/json'
+    //     }
+    //   }
+    // );
+    // return response.data.generatedText;
+
+    // حاليًا نرجع رد ثابت:
+    return `**Gemini Mock Reply**: تحليل للنص [${prompt}]`;
+  } catch (error) {
+    console.error('Gemini API error:', error);
+    return "Sorry, there's an error calling Gemini API.";
+  }
+}
+
+// ----------------------------------------------------
+// sendMessage: إرسال رسالة للمستخدم على ماسنجر
 // ----------------------------------------------------
 async function sendMessage(senderPsid, response) {
   const requestBody = {
